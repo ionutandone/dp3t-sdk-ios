@@ -69,7 +69,7 @@ DP3T-SDK is available through [Swift Package Manager](https://swift.org/package-
   ```swift
 
   dependencies: [
-      .package(url: "https://github.com/DP-3T/dp3t-sdk-ios.git", branch: "develop")
+      .package(url: "https://github.com/DP-3T/dp3t-sdk-ios.git", .branch("develop"))
   ]
 
   ```
@@ -81,7 +81,7 @@ DP3T-SDK is available through [Cocoapods](https://cocoapods.org/)
 
   ```ruby
 
-  pod 'DP3TSDK', => '0.0.1'
+  pod 'DP3TSDK', => '0.0.2'
 
   ```
 
@@ -187,19 +187,6 @@ The SDK supports iOS 13 Background tasks. To enable them the app has to support 
 	<string>fetch</string>
 </array>
 ```
-
-To support background fetch on devices with older iOS versions make sure to foreward the `performFetchWithCompletionHandler` call to the SDK.
-
-
-
-```swift
-func application(_ application: UIApplication, performFetchWithCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void) {  
-        DP3TTracing.performFetch(with: completionHandler)
-    }
-```
-
-#### 
-
 
 
 ## License

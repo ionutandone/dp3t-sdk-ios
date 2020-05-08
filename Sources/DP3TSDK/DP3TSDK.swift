@@ -52,7 +52,7 @@ class DP3TSDK {
         private(set) var identifierPrefix: String {
             get {
                 switch DP3TMode.current {
-                case let .calibration(identifierPrefix):
+                case let .calibration(identifierPrefix, _):
                     return identifierPrefix
                 default:
                     fatalError("identifierPrefix is only usable in calibration mode")
@@ -96,22 +96,24 @@ class DP3TSDK {
                              numberOfContacts: (try? database.contactsStorage.count()) ?? 0,
                              trackingState: .stopped,
                              lastSync: Default.shared.lastSync,
-                             infectionStatus: InfectionStatus.getInfectionState(with: database),
+                             infectionStatus: InfectionStatus.getInfectionState(from: database),
                              backgroundRefreshState: UIApplication.shared.backgroundRefreshStatus)
+
+        KnownCasesSynchronizer.initializeSynchronizerIfNeeded()
 
         if #available(iOS 13.0, *) {
             let backgroundTaskManager = DP3TBackgroundTaskManager()
             self.backgroundTaskManager = backgroundTaskManager
             #if CALIBRATION
-            backgroundTaskManager.logger = self
+                backgroundTaskManager.logger = self
             #endif
             backgroundTaskManager.register()
         } else {
             backgroundTaskManager = nil
         }
 
-        broadcaster.permissionDelegate = self
-        discoverer.permissionDelegate = self
+        broadcaster.bluetoothDelegate = self
+        discoverer.bluetoothDelegate = self
         discoverer.delegate = matcher
         matcher.delegate = self
 
@@ -122,11 +124,23 @@ class DP3TSDK {
             crypto.debugSecretKeysStorageDelegate = database.secretKeysStorage
         #endif
 
-        NotificationCenter.default.addObserver(self, selector: #selector(backgroundRefreshStatusDidChange), name: UIApplication.backgroundRefreshStatusDidChangeNotification, object: nil)
+        NotificationCenter.default.addObserver(self,
+                                               selector: #selector(backgroundRefreshStatusDidChange),
+                                               name: UIApplication.backgroundRefreshStatusDidChangeNotification,
+                                               object: nil)
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self,
+                                                  name: UIApplication.backgroundRefreshStatusDidChangeNotification,
+                                                  object: nil)
     }
 
     /// start tracing
     func startTracing() throws {
+        if case .infected = state.infectionStatus {
+            throw DP3TTracingError.userAlreadyMarkedAsInfected
+        }
         state.trackingState = .active
         discoverer.startScanning()
         broadcaster.startService()
@@ -141,11 +155,17 @@ class DP3TSDK {
 
     #if CALIBRATION
         func startAdvertising() throws {
+            if case .infected = state.infectionStatus {
+                throw DP3TTracingError.userAlreadyMarkedAsInfected
+            }
             state.trackingState = .activeAdvertising
             broadcaster.startService()
         }
 
         func startReceiving() throws {
+            if case .infected = state.infectionStatus {
+                throw DP3TTracingError.userAlreadyMarkedAsInfected
+            }
             state.trackingState = .activeReceiving
             discoverer.startScanning()
         }
@@ -165,10 +185,15 @@ class DP3TSDK {
                 return
             case let .success(service):
                 self?.synchronizer.sync(service: service) { [weak self] result in
-                    if case .success = result {
-                        self?.state.lastSync = Date()
+                    DispatchQueue.main.async {
+                        switch result {
+                        case .success:
+                            self?.state.lastSync = Date()
+                            callback?(.success(()))
+                        case let .failure(error):
+                            callback?(.failure(.networkingError(error: error)))
+                        }
                     }
-                    callback?(result)
                 }
             }
         }
@@ -183,20 +208,85 @@ class DP3TSDK {
     }
 
     /// tell the SDK that the user was exposed
+    /// This will stop tracing and reset the secret key
     /// - Parameters:
     ///   - onset: Start date of the exposure
     ///   - authString: Authentication string for the exposure change
+    ///   - isFakeRequest: indicates if the request should be a fake one. This method should be called regulary so people sniffing the networking traffic can no figure out if somebody is marking themself actually as exposed
     ///   - callback: callback
-    func iWasExposed(onset: Date, authentication: ExposeeAuthMethod, callback: @escaping (Result<Void, DP3TTracingError>) -> Void) {
-        setExposed(onset: onset, authentication: authentication, callback: callback)
+    func iWasExposed(onset: Date,
+                     authentication: ExposeeAuthMethod,
+                     isFakeRequest: Bool = false,
+                     callback: @escaping (Result<Void, DP3TTracingError>) -> Void) {
+
+        if !isFakeRequest,
+            case .infected = state.infectionStatus {
+            callback(.failure(DP3TTracingError.userAlreadyMarkedAsInfected))
+        }
+
+        getATracingServiceClient(forceRefresh: false) { [weak self] result in
+            guard let self = self else {
+                return
+            }
+            switch result {
+            case let .failure(error):
+                DispatchQueue.main.async {
+                    callback(.failure(error))
+                }
+            case let .success(service):
+                do {
+                    var day: DayDate
+                    var key: Data
+
+                    if isFakeRequest {
+                        // Send random data if request is fake
+                        day = DayDate(date: onset)
+                        key = (try? Crypto.generateRandomKey()) ?? Data()
+                    } else {
+                        (day, key) = try self.crypto.getSecretKeyForPublishing(onsetDate: onset)
+                    }
+
+                    let authData: String?
+                    if case let ExposeeAuthMethod.JSONPayload(token: token) = authentication {
+                        authData = token
+                    } else {
+                        authData = nil
+                    }
+                    let model = ExposeeModel(key: key, keyDate: day, authData: authData, fake: isFakeRequest)
+                    service.addExposee(model, authentication: authentication) { [weak self] result in
+                        DispatchQueue.main.async {
+                            switch result {
+                            case .success:
+                                if !isFakeRequest {
+                                    self?.state.infectionStatus = .infected
+                                    self?.stopTracing()
+                                    try! self?.crypto.reinitialize()
+                                }
+                                callback(.success(()))
+                            case let .failure(error):
+                                callback(.failure(.networkingError(error: error)))
+                            }
+                        }
+                    }
+                } catch let error as DP3TTracingError {
+                    DispatchQueue.main.async {
+                        callback(.failure(error))
+                    }
+                } catch {
+                    DispatchQueue.main.async {
+                        callback(.failure(DP3TTracingError.cryptographyError(error: "Cannot get secret key")))
+                    }
+                }
+            }
+        }
     }
 
     #if CALIBRATION
-    func getSecretKeyRepresentationForToday() throws -> String {
-        let key = try crypto.getCurrentSK()
-        let keyRepresentation = key.base64EncodedString()
-        return "****** ****** " + String(keyRepresentation.suffix(6))
-    }
+        func getSecretKeyRepresentationForToday() throws -> String {
+            let key = try crypto.getCurrentSK()
+            let keyRepresentation = key.base64EncodedString()
+            return "****** ****** " + String(keyRepresentation.suffix(6))
+        }
     #endif
 
     /// used to construct a new tracing service client
@@ -214,11 +304,11 @@ class DP3TSDK {
                     switch result {
                     case .success:
                         do {
-                            let desc = try self.database.applicationStorage.descriptor(for: appId) 
+                            let desc = try self.database.applicationStorage.descriptor(for: appId)
                             let client = ExposeeServiceClient(descriptor: desc)
                             self.cachedTracingServiceClient = client
                             callback(.success(client))
-                        } catch  {
+                        } catch {
                             callback(.failure(DP3TTracingError.databaseError(error: error)))
                         }
                     case let .failure(error):
@@ -234,58 +324,10 @@ class DP3TSDK {
         }
     }
 
-    /// update the backend with the new exposure state
-    /// - Parameters:
-    ///   - onset: Start date of the exposure
-    ///   - authString: Authentication string for the exposure change
-    ///   - callback: callback
-    private func setExposed(onset: Date, authentication: ExposeeAuthMethod, callback: @escaping (Result<Void, DP3TTracingError>) -> Void) {
-        getATracingServiceClient(forceRefresh: false) { [weak self] result in
-            guard let self = self else {
-                return
-            }
-            switch result {
-            case let .failure(error):
-                DispatchQueue.main.async {
-                    callback(.failure(error))
-                }
-            case let .success(service):
-                do {
-                    let block: ((Result<Void, DP3TTracingError>) -> Void) = { [weak self] result in
-                        if case .success = result {
-                            self?.state.infectionStatus = .infected
-                        }
-                        DispatchQueue.main.async {
-                            callback(result)
-                        }
-                    }
-                    
-                    if let (day, key) = try self.crypto.getSecretKeyForPublishing(onsetDate: onset) {
-                        let authData: String?
-                        if case let ExposeeAuthMethod.JSONPayload(token: token) = authentication {
-                            authData = token
-                        } else {
-                            authData = nil
-                        }
-                        let model = ExposeeModel(key: key, onset: day, authData: authData)
-                        service.addExposee(model, authentication: authentication, completion: block)
-                    }
-                } catch let error as DP3TTracingError {
-                    DispatchQueue.main.async {
-                        callback(.failure(error))
-                    }
-                } catch {
-                    DispatchQueue.main.async {
-                        callback(.failure(DP3TTracingError.cryptographyError(error: "Cannot get secret key")))
-                    }
-                }
-            }
-        }
-    }
-
     /// reset the SDK
     func reset() throws {
         stopTracing()
+        Default.shared.lastLoadedBatchReleaseTime = nil
         Default.shared.lastSync = nil
         Default.shared.didMarkAsInfected = false
         try database.emptyStorage()
@@ -317,7 +359,7 @@ class DP3TSDK {
 
 extension DP3TSDK: DP3TMatcherDelegate {
     func didFindMatch() {
-        state.infectionStatus = InfectionStatus.getInfectionState(with: database)
+        state.infectionStatus = InfectionStatus.getInfectionState(from: database)
     }
 
     func handShakeAdded(_ handshake: HandshakeModel) {
@@ -332,11 +374,11 @@ extension DP3TSDK: DP3TMatcherDelegate {
 
 // MARK: BluetoothPermissionDelegate implementation
 
-extension DP3TSDK: BluetoothPermissionDelegate {
+extension DP3TSDK: BluetoothDelegate {
     func noIssues() {
         state.trackingState = .active
     }
-    
+
     func deviceTurnedOff() {
         state.trackingState = .inactive(error: .bluetoothTurnedOff)
     }
@@ -344,13 +386,28 @@ extension DP3TSDK: BluetoothPermissionDelegate {
     func unauthorized() {
         state.trackingState = .inactive(error: .permissonError)
     }
+
+    func errorOccured(error: DP3TTracingError) {
+        state.trackingState = .inactive(error: error)
+    }
 }
 
 #if CALIBRATION
     extension DP3TSDK: LoggingDelegate {
         func log(type: LogType, _ string: String) {
-            os_log("%@: %@", type.description, string)
-            if let entry = try? database.loggingStorage.log(type: type, message: string) {
+            let appVersion: String
+            switch DP3TMode.current {
+            case .production:
+                appVersion = "-"
+            case let .calibration(_, av):
+                appVersion = av
+            }
+
+            let logString = "[\(appVersion)|\(DP3TTracing.frameworkVersion)] \(type.description): \(string)"
+            os_log("%@", logString)
+
+            let dbLogString = "[\(appVersion)|\(DP3TTracing.frameworkVersion)] \(string)"
+            if let entry = try? database.loggingStorage.log(type: type, message: dbLogString) {
                 DispatchQueue.main.async {
                     self.delegate?.didAddLog(entry)
                 }

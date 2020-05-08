@@ -12,18 +12,20 @@ public enum InfectionStatus {
     /// The user is healthy and had no contact with any infected person
     case healthy
     /// The user was in contact with a person that was flagged as infected
-    case exposed(days: [MatchedContact])
+    case exposed(days: [ExposureDay])
     /// The user is infected and has signaled it himself
     case infected
 
-    static func getInfectionState(with database: DP3TDatabase) -> InfectionStatus {
-        let numberOfMatchedContacts = try? database.matchedContactsStorage.count()
-        let hasMatchedContacts: Bool = (numberOfMatchedContacts ?? 0) > 0
-        if Default.shared.didMarkAsInfected {
+    static func getInfectionState(from database: DP3TDatabase) -> InfectionStatus {
+        guard Default.shared.didMarkAsInfected == false else {
             return .infected
-        } else if hasMatchedContacts,
-            let matchedContacts = try? database.matchedContactsStorage.getMatchedContacts() {
-            return .exposed(days: matchedContacts)
+        }
+
+        let matchingDays = try? database.exposureDaysStorage.count()
+        let hasMatchingDays: Bool = (matchingDays ?? 0) > 0
+        if hasMatchingDays,
+            let matchedDays = try? database.exposureDaysStorage.getExposureDays() {
+            return .exposed(days: matchedDays)
         } else {
             return .healthy
         }

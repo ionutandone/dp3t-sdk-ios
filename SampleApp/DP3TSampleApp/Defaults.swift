@@ -4,6 +4,7 @@
  * Copyright (c) 2020. All rights reserved.
  */
 
+import DP3TSDK_CALIBRATION
 import Foundation
 
 /// UserDefaults Storage Singleton
@@ -18,15 +19,6 @@ class Default {
         }
         set(newValue) {
             store.set(newValue, forKey: "org.dpppt.sampleapp.identifierPrefix")
-        }
-    }
-
-    var reconnectionDelay: Int {
-        get {
-            return (store.object(forKey: "org.dpppt.sampleapp.reconnectionDelay") as? Int) ?? 60 * 2
-        }
-        set(newValue) {
-            store.set(newValue, forKey: "org.dpppt.sampleapp.reconnectionDelay")
         }
     }
 

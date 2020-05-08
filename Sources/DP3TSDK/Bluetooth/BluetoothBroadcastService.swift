@@ -22,7 +22,7 @@ class BluetoothBroadcastService: NSObject {
     private var localName: String = UUID().uuidString
 
     /// An object that can handle bluetooth permission requests and errors
-    public weak var permissionDelegate: BluetoothPermissionDelegate?
+    public weak var bluetoothDelegate: BluetoothDelegate?
 
     #if CALIBRATION
         /// A logger to output messages
@@ -67,9 +67,9 @@ class BluetoothBroadcastService: NSObject {
         guard peripheralManager?.state == .some(.poweredOn) else {
             return
         }
-        service = CBMutableService(type: BluetoothConstants.serviceCBUUID,
+        service = CBMutableService(type: Default.shared.parameters.bluetooth.serviceCBUUID,
                                    primary: true)
-        let characteristic = CBMutableCharacteristic(type: BluetoothConstants.characteristicsCBUUID,
+        let characteristic = CBMutableCharacteristic(type: Default.shared.parameters.bluetooth.characteristicsCBUUID,
                                                      properties: [.read, .notify],
                                                      value: nil,
                                                      permissions: .readable)
@@ -77,7 +77,7 @@ class BluetoothBroadcastService: NSObject {
         peripheralManager?.add(service!)
 
         #if CALIBRATION
-            logger?.log(type: .sender, "added Service with \(BluetoothConstants.serviceCBUUID.uuidString)")
+            logger?.log(type: .sender, "added Service with \(Default.shared.parameters.bluetooth.serviceCBUUID.uuidString)")
         #endif
     }
 }
@@ -92,36 +92,46 @@ extension BluetoothBroadcastService: CBPeripheralManagerDelegate {
 
         switch peripheral.state {
         case .poweredOn where service == nil:
-            permissionDelegate?.noIssues()
+            bluetoothDelegate?.noIssues()
             addService()
         case .poweredOff:
-            permissionDelegate?.deviceTurnedOff()
+            bluetoothDelegate?.deviceTurnedOff()
         case .unauthorized:
-            permissionDelegate?.unauthorized()
+            bluetoothDelegate?.unauthorized()
         default:
             break
         }
     }
 
-    func peripheralManager(_ peripheral: CBPeripheralManager, didAdd service: CBService, error _: Error?) {
+    func peripheralManager(_ peripheral: CBPeripheralManager, didAdd service: CBService, error: Error?) {
+        if let error = error {
+            #if CALIBRATION
+            logger?.log(type: .sender, "peripheraldidAddservice error: \(error.localizedDescription)")
+            #endif
+            bluetoothDelegate?.errorOccured(error: .coreBluetoothError(error: error))
+        }
         #if CALIBRATION
             logger?.log(type: .sender, state: peripheral.state, prefix: "peripheralManagerdidAddservice")
         #endif
 
         peripheralManager?.startAdvertising([
-            CBAdvertisementDataServiceUUIDsKey: [BluetoothConstants.serviceCBUUID],
+            CBAdvertisementDataServiceUUIDsKey: [Default.shared.parameters.bluetooth.serviceCBUUID],
             CBAdvertisementDataLocalNameKey: "",
         ])
     }
 
-    #if CALIBRATION
-        func peripheralManagerDidStartAdvertising(_ peripheral: CBPeripheralManager, error: Error?) {
-            logger?.log(type: .sender, state: peripheral.state, prefix: "peripheralManagerDidStartAdvertising")
-            if let error = error {
-                logger?.log(type: .sender, "peripheralManagerDidStartAdvertising error: \(error.localizedDescription)")
-            }
+
+    func peripheralManagerDidStartAdvertising(_ peripheral: CBPeripheralManager, error: Error?) {
+        #if CALIBRATION
+        logger?.log(type: .sender, state: peripheral.state, prefix: "peripheralManagerDidStartAdvertising")
+        #endif
+        if let error = error {
+            #if CALIBRATION
+            logger?.log(type: .sender, "peripheralManagerDidStartAdvertising error: \(error.localizedDescription)")
+            #endif
+            bluetoothDelegate?.errorOccured(error: .coreBluetoothError(error: error))
         }
-    #endif
+    }
 
     func peripheralManager(_: CBPeripheralManager, didReceiveRead request: CBATTRequest) {
         #if CALIBRATION
@@ -131,11 +141,11 @@ extension BluetoothBroadcastService: CBPeripheralManagerDelegate {
             var data = try crypto!.getCurrentEphID()
 
             #if CALIBRATION
-            if case .calibration(let identifierPrefix) = DP3TMode.current, identifierPrefix != "" {
-                let paddedIdentifier = identifierPrefix.padding(toLength: 4, withPad: " ", startingAt: 0)
-                let identifierData = paddedIdentifier.data(using: .utf8)!
-                data = identifierData + data.suffix(data.count - identifierData.count)
-            }
+                if case let .calibration(identifierPrefix, _) = DP3TMode.current, identifierPrefix != "" {
+                    let paddedIdentifier = identifierPrefix.padding(toLength: 4, withPad: " ", startingAt: 0)
+                    let identifierData = paddedIdentifier.data(using: .utf8)!
+                    data = identifierData + data.suffix(data.count - identifierData.count)
+                }
             #endif
 
             request.value = data
@@ -154,7 +164,7 @@ extension BluetoothBroadcastService: CBPeripheralManagerDelegate {
 
     func peripheralManager(_: CBPeripheralManager, willRestoreState dict: [String: Any]) {
         if let services: [CBMutableService] = dict[CBPeripheralManagerRestoredStateServicesKey] as? [CBMutableService],
-            let service = services.first(where: { $0.uuid == BluetoothConstants.serviceCBUUID }) {
+            let service = services.first(where: { $0.uuid == Default.shared.parameters.bluetooth.serviceCBUUID }) {
             self.service = service
             #if CALIBRATION
                 logger?.log(type: .sender, "PeripheralManager#willRestoreState services :\(services.count)")

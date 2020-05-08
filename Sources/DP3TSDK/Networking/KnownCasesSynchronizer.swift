@@ -7,9 +7,7 @@
 import Foundation
 
 /**
- Synchronizes data on known cases for the time period of the past 14 days and stores them to the local database.
-
- Use a fresh instance for every synchronization call.
+ Synchronizes data on known cases
  */
 class KnownCasesSynchronizer {
     /// The app id to use
@@ -17,14 +15,7 @@ class KnownCasesSynchronizer {
     /// A database to store the known cases
     private let database: KnownCasesStorage
 
-    // keep track of errors and successes with regard to individual requests (networking or database errors)
-    private var errors = [(Date, DP3TTracingError)]()
-    // a list of temporary known cases
-    private var knownCases = [Date: [KnownCaseModel]]()
-
-    // keep track of the number of issued and fulfilled requests
-    private var numberOfIssuedRequests: Int = 0
-    private var numberOfFulfilledRequests: Int = 0
+    private var defaults: DefaultStorage
 
     /// A DP3T matcher
     private weak var matcher: DP3TMatcherProtocol?
@@ -34,102 +25,82 @@ class KnownCasesSynchronizer {
     ///   - appId: The app id to use
     ///   - database: The database for storage
     ///   - matcher: The matcher for DP3T resolution and checks
-    init(appInfo: DP3TApplicationInfo, database: DP3TDatabase, matcher: DP3TMatcherProtocol) {
+    init(appInfo: DP3TApplicationInfo,
+         database: DP3TDatabase,
+         matcher: DP3TMatcherProtocol,
+         defaults: DefaultStorage = Default.shared) {
         self.appInfo = appInfo
         self.database = database.knownCasesStorage
         self.matcher = matcher
+        self.defaults = defaults
     }
 
     /// A callback result of async operations
-    typealias Callback = (Result<Void, DP3TTracingError>) -> Void
+    typealias Callback = (Result<Void, DP3TNetworkingError>) -> Void
 
     /// Synchronizes the local database with the remote one
     /// - Parameters:
     ///   - service: The service to use for synchronization
     ///   - callback: The callback once the task if finished
-    func sync(service: ExposeeServiceClient, callback: Callback?) {
-        // compute batch time stamps for the last 14 days
-        let today = DayDate()
-        let batchesPerDay = Int(TimeInterval.day) / NetworkingConstants.batchLenght
-        let batchTimestamps = (0 ..< NetworkingConstants.daysToFetch).reversed().flatMap { days -> [Date] in
-            let date = today.dayMin.addingTimeInterval(.day * Double(days) * -1)
-            return (0 ..< batchesPerDay).compactMap { batch in
-                let batchDate = date.addingTimeInterval(TimeInterval(batch * NetworkingConstants.batchLenght))
-                if batchDate.timeIntervalSinceNow > 0 {
-                    return nil
-                }
-                return batchDate
-            }
+    /// - Returns: the operation which can be used to cancel the sync
+    @discardableResult
+    func sync(service: ExposeeServiceClientProtocol, now: Date = Date(), callback: Callback?) -> Operation {
+        let queue = OperationQueue()
+
+        let operation = BlockOperation {
+            self.internalSync(service: service, now: now, callback: callback)
         }
 
-        for batchTimestamp in batchTimestamps {
-            service.getExposee(batchTimestamp: batchTimestamp,
-                               completion: dayResultHandler(batchTimestamp, callback: callback))
-        }
+        queue.addOperation(operation)
+
+        return operation
     }
 
-    /// Handle a single day
-    /// - Parameters:
-    ///   - dayIdentifier: The day identifier
-    ///   - callback: The callback once the task is finished
-    private func dayResultHandler(_ batchTimestamp: Date, callback: Callback?) -> (Result<[KnownCaseModel]?, DP3TTracingError>) -> Void {
-        numberOfIssuedRequests += 1
-        return { result in
+    /// Stores the first SDK launch date
+    @discardableResult
+    static func initializeSynchronizerIfNeeded(defaults: DefaultStorage = Default.shared) -> Date {
+        guard defaults.lastLoadedBatchReleaseTime == nil else { return defaults.lastLoadedBatchReleaseTime! }
+        let nowTimestamp = Date().timeIntervalSince1970
+        let lastBatch = Date(timeIntervalSince1970: nowTimestamp - nowTimestamp.truncatingRemainder(dividingBy: Default.shared.parameters.networking.batchLength))
+        var mutableDefaults = defaults
+        mutableDefaults.lastLoadedBatchReleaseTime = lastBatch
+        return lastBatch
+    }
+
+    private func internalSync(service: ExposeeServiceClientProtocol, now: Date = Date(), callback: Callback?) {
+        let nowTimestamp = now.timeIntervalSince1970
+
+        var lastBatch: TimeInterval!
+        if let storedLastBatch = defaults.lastLoadedBatchReleaseTime,
+            storedLastBatch < Date() {
+            lastBatch = storedLastBatch.timeIntervalSince1970
+        } else {
+            assert(false, "This should never happen if initializeSynchronizerIfNeeded gets called on SDK init")
+            lastBatch = KnownCasesSynchronizer.initializeSynchronizerIfNeeded().timeIntervalSince1970
+        }
+
+        let batchesToLoad = Int((nowTimestamp - lastBatch) / Default.shared.parameters.networking.batchLength)
+
+        let nextBatch = lastBatch + Default.shared.parameters.networking.batchLength
+
+        for batchIndex in 0 ..< batchesToLoad {
+            let currentReleaseTime = Date(timeIntervalSince1970: nextBatch + Default.shared.parameters.networking.batchLength * TimeInterval(batchIndex))
+            let result = service.getExposeeSynchronously(batchTimestamp: currentReleaseTime)
             switch result {
             case let .failure(error):
-                self.errors.append((batchTimestamp, error))
-            case let .success(data):
-                if let data = data {
-                    self.knownCases[batchTimestamp] = data
+                callback?(.failure(error))
+                return
+            case let .success(knownCases):
+                if let knownCases = knownCases {
+                    try? database.update(knownCases: knownCases)
+                    for knownCase in knownCases {
+                        try? matcher?.checkNewKnownCase(knownCase)
+                    }
                 }
-            }
-            self.numberOfFulfilledRequests += 1
-            self.checkForCompletion(callback: callback)
-        }
-    }
-
-    /** Checks whether all issued requests have completed and then invokes the subsuming completion handler  */
-    private func checkForCompletion(callback: Callback?) {
-        guard numberOfFulfilledRequests == numberOfIssuedRequests else {
-            return
-        }
-
-        /// If we encountered a timeInconsistency we return it
-        func completeWithError(){
-            if let tError = errors.first(where: {
-                if case DP3TTracingError.timeInconsistency(shift: _) = $0.1 {
-                    return true
-                } else {
-                    return false
-                }
-            }) {
-                callback?(.failure(tError.1))
-            } else {
-                callback?(Result.failure(.caseSynchronizationError(errors: errors.map(\.1))))
+                defaults.lastLoadedBatchReleaseTime = currentReleaseTime
             }
         }
 
-        if errors.count == numberOfIssuedRequests { // all requests failed
-            completeWithError()
-        } else if errors.count > 0 { // some requests failed
-            completeWithError()
-        } else { // all requests were successful
-            processDayResults(callback: callback)
-        }
-
-        errors.removeAll()
-        knownCases.removeAll()
-    }
-
-    /** Process all received day data. */
-    private func processDayResults(callback: Callback?) {
-        // TODO: Handle db errors
-        let mergedKnownCases = knownCases.values.flatMap{ $0 }
-        try? database.update(knownCases: mergedKnownCases)
-        for knownCase in mergedKnownCases {
-            try? matcher?.checkNewKnownCase(knownCase)
-        }
-
-        callback?(Result.success(()))
+        callback?(.success(()))
     }
 }

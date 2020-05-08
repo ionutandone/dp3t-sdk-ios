@@ -8,13 +8,20 @@ import DP3TSDK_CALIBRATION
 import os
 import UIKit
 
-func initializeSDK(){
+func initializeSDK() {
     /// Can be initialized either by:
     /// - using the discovery:
+    let appVersion: String
+    if let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String,
+        let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String {
+        appVersion = "\(version)(\(build))"
+    } else {
+        appVersion = "N/A"
+    }
     try! DP3TTracing.initialize(with: .discovery("org.dpppt.demo", enviroment: .dev),
-                                mode: .calibration(identifierPrefix: Default.shared.identifierPrefix ?? ""))
+                                mode: .calibration(identifierPrefix: Default.shared.identifierPrefix ?? "", appVersion: appVersion))
     /// - passing the url:
-    //try! DP3TTracing.initialize(with: .manual(.init(appId: "org.dpppt.demo", bucketBaseUrl: URL(string: "https://demo.dpppt.org/")!, reportBaseUrl: URL(string: "https://demo.dpppt.org/")!, jwtPublicKey: Data)),
+    // try! DP3TTracing.initialize(with: .manual(.init(appId: "org.dpppt.demo", bucketBaseUrl: URL(string: "https://demo.dpppt.org/")!, reportBaseUrl: URL(string: "https://demo.dpppt.org/")!, jwtPublicKey: nil)),
     //                            mode: .calibration(identifierPrefix: Default.shared.identifierPrefix ?? ""))
 }
 
@@ -23,10 +30,8 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     var window: UIWindow?
 
     func application(_ application: UIApplication, didFinishLaunchingWithOptions _: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
-        DP3TTracing.reconnectionDelay = Default.shared.reconnectionDelay
-
         initializeSDK()
-        
+
         if application.applicationState != .background {
             initWindow()
         }
@@ -57,5 +62,4 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
             initWindow()
         }
     }
-
 }

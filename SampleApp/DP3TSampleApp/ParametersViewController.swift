@@ -11,6 +11,7 @@ class ParametersViewController: UIViewController {
     let stackView = UIStackView()
 
     let reconnectionDelayInput = UITextField()
+    let batchLengthInput = UITextField()
 
     init() {
         super.init(nibName: nil, bundle: nil)
@@ -38,12 +39,15 @@ class ParametersViewController: UIViewController {
         }
         stackView.axis = .vertical
 
+
+        let params = DP3TTracing.parameters
+
         do {
             let label = UILabel()
             label.text = "Set Reconnection Delay (seconds)"
             stackView.addArrangedSubview(label)
 
-            reconnectionDelayInput.text = "\(Default.shared.reconnectionDelay)"
+            reconnectionDelayInput.text = "\(params.bluetooth.peripheralReconnectDelay)"
             reconnectionDelayInput.delegate = self
             reconnectionDelayInput.font = UIFont.systemFont(ofSize: 15)
             reconnectionDelayInput.borderStyle = UITextField.BorderStyle.roundedRect
@@ -68,16 +72,53 @@ class ParametersViewController: UIViewController {
             stackView.addArrangedSubview(button)
         }
 
+        do {
+            let label = UILabel()
+            label.text = "Set buckets batch length (seconds)"
+            stackView.addArrangedSubview(label)
+
+            batchLengthInput.text = "\(params.networking.batchLength)"
+            batchLengthInput.delegate = self
+            batchLengthInput.font = UIFont.systemFont(ofSize: 15)
+            batchLengthInput.borderStyle = UITextField.BorderStyle.roundedRect
+            batchLengthInput.autocorrectionType = UITextAutocorrectionType.no
+            batchLengthInput.keyboardType = UIKeyboardType.numberPad
+            batchLengthInput.returnKeyType = UIReturnKeyType.done
+            batchLengthInput.clearButtonMode = UITextField.ViewMode.whileEditing
+            batchLengthInput.contentVerticalAlignment = UIControl.ContentVerticalAlignment.center
+            batchLengthInput.delegate = self
+            stackView.addArrangedSubview(batchLengthInput)
+
+            let button = UIButton()
+            if #available(iOS 13.0, *) {
+                button.setTitleColor(.systemBlue, for: .normal)
+                button.setTitleColor(.systemGray, for: .highlighted)
+            } else {
+                button.setTitleColor(.blue, for: .normal)
+                button.setTitleColor(.black, for: .highlighted)
+            }
+            button.setTitle("Update", for: .normal)
+            button.addTarget(self, action: #selector(batchLengthUpdate), for: .touchUpInside)
+            stackView.addArrangedSubview(button)
+        }
+
         stackView.addArrangedView(UIView())
     }
 
     @objc func updateReconnectionDelay() {
         let delay = reconnectionDelayInput.text ?? "0"
         let intDelay = Int(delay) ?? 0
-        Default.shared.reconnectionDelay = intDelay
-        reconnectionDelayInput.text = "\(Default.shared.reconnectionDelay)"
-        DP3TTracing.reconnectionDelay = Default.shared.reconnectionDelay
+        reconnectionDelayInput.text = "\(intDelay)"
+        DP3TTracing.parameters.bluetooth.peripheralReconnectDelay = intDelay
         reconnectionDelayInput.resignFirstResponder()
+    }
+
+    @objc func batchLengthUpdate() {
+        let length = batchLengthInput.text ?? "7200"
+        let double = Double(length) ?? 7200.0
+        batchLengthInput.text = "\(double)"
+        DP3TTracing.parameters.networking.batchLength = double
+        batchLengthInput.resignFirstResponder()
     }
 }
 
